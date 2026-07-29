@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "667489189358",
+    "project_id": "oruso-86359",
+    "storage_bucket": "oruso-86359.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:667489189358:android:e3a786ae041c2bb161a2ff",
+        "android_client_info": {
+          "package_name": "com.oruso.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3_3FuDvwFlOewulqP4KAtB-lCBOBxYQg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
