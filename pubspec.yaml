@@ -1,7 +1,7 @@
 name: oruso
 description: ORUSO - Workout, Meal & Friends App
 publish_to: "none"
-version: 0.5.0+5
+version: 0.6.0+6
 
 environment:
   sdk: ">=3.5.0 <4.0.0"
@@ -10,11 +10,24 @@ dependencies:
   flutter:
     sdk: flutter
   shared_preferences: ^2.5.3
+  firebase_core: ^4.0.0
+  firebase_auth: ^6.0.0
+  cloud_firestore: ^6.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/oruso_logo.png
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: assets/oruso_logo.png
+  adaptive_icon_background: "#8DE8F2"
+  adaptive_icon_foreground: assets/oruso_logo.png

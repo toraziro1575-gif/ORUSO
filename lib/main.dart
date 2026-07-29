@@ -1,9 +1,13 @@
-import 'dart:convert';
+import 'dart:math';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   runApp(const OrusoApp());
 }
 
@@ -18,360 +22,299 @@ class OrusoApp extends StatelessWidget {
       themeMode: ThemeMode.dark,
       darkTheme: ThemeData(
         brightness: Brightness.dark,
+        useMaterial3: true,
         colorSchemeSeed: const Color(0xFF8ED1B2),
         scaffoldBackgroundColor: const Color(0xFF101414),
-        useMaterial3: true,
-        cardTheme: const CardThemeData(
-          color: Color(0xFF1A2221),
-          margin: EdgeInsets.zero,
+        cardTheme: const CardThemeData(color: Color(0xFF1A2221)),
+      ),
+      home: const AuthGate(),
+    );
+  }
+}
+
+String normalizeId(String value) => value.trim().toUpperCase();
+String internalEmail(String id) => '${id.toLowerCase()}@users.oruso.app';
+
+String createRandomId() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  final random = Random.secure();
+  final code = List.generate(8, (_) => chars[random.nextInt(chars.length)]).join();
+  return 'ORUSO-$code';
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        }
+        return snapshot.data == null
+            ? const LoginPage()
+            : MainPage(user: snapshot.data!);
+      },
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final idController = TextEditingController();
+  final passwordController = TextEditingController();
+  bool registerMode = false;
+  bool busy = false;
+  bool obscure = true;
+
+  @override
+  void dispose() {
+    idController.dispose();
+    passwordController.dispose();
+    super.dispose();
+  }
+
+  void message(String text) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<String> reserveId() async {
+    for (var i = 0; i < 15; i++) {
+      final id = createRandomId();
+      final snap = await FirebaseFirestore.instance.collection('usernames').doc(id).get();
+      if (!snap.exists) return id;
+    }
+    throw Exception('IDの発行に失敗しました。');
+  }
+
+  Future<void> register() async {
+    if (passwordController.text.length < 8) {
+      message('パスワードは8文字以上にしてください。');
+      return;
+    }
+
+    setState(() => busy = true);
+    UserCredential? credential;
+    try {
+      final id = await reserveId();
+      credential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        email: internalEmail(id),
+        password: passwordController.text,
+      );
+
+      final uid = credential.user!.uid;
+      final batch = FirebaseFirestore.instance.batch();
+      batch.set(FirebaseFirestore.instance.collection('users').doc(uid), {
+        'uid': uid,
+        'userId': id,
+        'nickname': 'ORUSOユーザー',
+        'bio': '',
+        'visibility': 'private',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      batch.set(FirebaseFirestore.instance.collection('usernames').doc(id), {
+        'uid': uid,
+        'userId': id,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      await batch.commit();
+
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => AlertDialog(
+          title: const Text('あなたのORUSO ID'),
+          content: SelectableText(
+            '$id\n\nこのIDと設定したパスワードでログインします。\n'
+            '本物のメールアドレスは登録しません。\n'
+            '現段階ではパスワードを忘れると復旧できないため、必ず保存してください。',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('保存しました'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (credential?.user != null) {
+        await credential!.user!.delete().catchError((_) {});
+      }
+      message('登録に失敗しました：$e');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> login() async {
+    final id = normalizeId(idController.text);
+    if (!id.startsWith('ORUSO-') || passwordController.text.isEmpty) {
+      message('ORUSO IDとパスワードを入力してください。');
+      return;
+    }
+
+    setState(() => busy = true);
+    try {
+      await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: internalEmail(id),
+        password: passwordController.text,
+      );
+    } catch (_) {
+      message('IDまたはパスワードが違います。');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            const SizedBox(height: 22),
+            Image.asset('assets/oruso_logo.png', height: 170),
+            const SizedBox(height: 12),
+            Text(
+              'ORUSO',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                    fontWeight: FontWeight.w900,
+                  ),
+            ),
+            const Text(
+              '記録で強くなる、つながりで続く。',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 28),
+            SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(value: false, label: Text('ログイン')),
+                ButtonSegment(value: true, label: Text('新規登録')),
+              ],
+              selected: {registerMode},
+              onSelectionChanged: busy
+                  ? null
+                  : (values) => setState(() => registerMode = values.first),
+            ),
+            const SizedBox(height: 18),
+            if (!registerMode)
+              TextField(
+                controller: idController,
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(
+                  labelText: 'ORUSO ID',
+                  hintText: 'ORUSO-XXXXXXXX',
+                  border: OutlineInputBorder(),
+                ),
+              )
+            else
+              const Card(
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text(
+                    '新規登録時にランダムなORUSO IDを発行します。'
+                    '\nメールアドレス・電話番号・住所は入力しません。',
+                  ),
+                ),
+              ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: passwordController,
+              obscureText: obscure,
+              decoration: InputDecoration(
+                labelText: registerMode ? '設定するパスワード（8文字以上）' : 'パスワード',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  onPressed: () => setState(() => obscure = !obscure),
+                  icon: Icon(obscure ? Icons.visibility : Icons.visibility_off),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: busy ? null : (registerMode ? register : login),
+              icon: busy
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(registerMode ? Icons.person_add : Icons.login),
+              label: Text(registerMode ? 'IDを発行して登録' : 'ログイン'),
+            ),
+          ],
         ),
       ),
-      home: const MainShell(),
     );
   }
 }
 
-DateTime dayOnly(DateTime d) => DateTime(d.year, d.month, d.day);
-
-String timeText(DateTime d) =>
-    '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-
-class WorkoutEntry {
-  WorkoutEntry({
-    required this.id,
-    required this.exercise,
-    required this.weight,
-    required this.reps,
-    required this.sets,
-    required this.durationMinutes,
-    required this.memo,
-    required this.createdAt,
-  });
-
-  final String id;
-  final String exercise;
-  final double weight;
-  final int reps;
-  final int sets;
-  final int durationMinutes;
-  final String memo;
-  final DateTime createdAt;
-
-  double get volume => weight * reps * sets;
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'exercise': exercise,
-        'weight': weight,
-        'reps': reps,
-        'sets': sets,
-        'durationMinutes': durationMinutes,
-        'memo': memo,
-        'createdAt': createdAt.toIso8601String(),
-      };
-
-  factory WorkoutEntry.fromJson(Map<String, dynamic> json) => WorkoutEntry(
-        id: json['id'] as String,
-        exercise: json['exercise'] as String,
-        weight: (json['weight'] as num).toDouble(),
-        reps: json['reps'] as int,
-        sets: json['sets'] as int,
-        durationMinutes: (json['durationMinutes'] as num?)?.toInt() ?? 0,
-        memo: json['memo'] as String? ?? '',
-        createdAt: DateTime.parse(json['createdAt'] as String),
-      );
-}
-
-class WeightEntry {
-  WeightEntry({
-    required this.id,
-    required this.weight,
-    required this.createdAt,
-  });
-
-  final String id;
-  final double weight;
-  final DateTime createdAt;
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'weight': weight,
-        'createdAt': createdAt.toIso8601String(),
-      };
-
-  factory WeightEntry.fromJson(Map<String, dynamic> json) => WeightEntry(
-        id: json['id'] as String,
-        weight: (json['weight'] as num).toDouble(),
-        createdAt: DateTime.parse(json['createdAt'] as String),
-      );
-}
-
-class MealEntry {
-  MealEntry({
-    required this.id,
-    required this.mealType,
-    required this.food,
-    required this.memo,
-    required this.createdAt,
-  });
-
-  final String id;
-  final String mealType;
-  final String food;
-  final String memo;
-  final DateTime createdAt;
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'mealType': mealType,
-        'food': food,
-        'memo': memo,
-        'createdAt': createdAt.toIso8601String(),
-      };
-
-  factory MealEntry.fromJson(Map<String, dynamic> json) => MealEntry(
-        id: json['id'] as String,
-        mealType: json['mealType'] as String,
-        food: json['food'] as String,
-        memo: json['memo'] as String? ?? '',
-        createdAt: DateTime.parse(json['createdAt'] as String),
-      );
-}
-
-class LocalStore {
-  static const _workoutsKey = 'oruso_workouts_v1';
-  static const _weightsKey = 'oruso_weights_v1';
-  static const _mealsKey = 'oruso_meals_v1';
-
-  static Future<List<WorkoutEntry>> loadWorkouts() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_workoutsKey);
-    if (raw == null || raw.isEmpty) return [];
-    try {
-      final items = jsonDecode(raw) as List<dynamic>;
-      return items
-          .map((e) => WorkoutEntry.fromJson(e as Map<String, dynamic>))
-          .toList();
-    } catch (_) {
-      return [];
-    }
-  }
-
-  static Future<List<WeightEntry>> loadWeights() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_weightsKey);
-    if (raw == null || raw.isEmpty) return [];
-    try {
-      final items = jsonDecode(raw) as List<dynamic>;
-      return items
-          .map((e) => WeightEntry.fromJson(e as Map<String, dynamic>))
-          .toList();
-    } catch (_) {
-      return [];
-    }
-  }
-
-  static Future<List<MealEntry>> loadMeals() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_mealsKey);
-    if (raw == null || raw.isEmpty) return [];
-    try {
-      final items = jsonDecode(raw) as List<dynamic>;
-      return items
-          .map((e) => MealEntry.fromJson(e as Map<String, dynamic>))
-          .toList();
-    } catch (_) {
-      return [];
-    }
-  }
-
-  static Future<void> saveWorkouts(List<WorkoutEntry> items) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _workoutsKey,
-      jsonEncode(items.map((e) => e.toJson()).toList()),
-    );
-  }
-
-  static Future<void> saveWeights(List<WeightEntry> items) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _weightsKey,
-      jsonEncode(items.map((e) => e.toJson()).toList()),
-    );
-  }
-
-  static Future<void> saveMeals(List<MealEntry> items) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _mealsKey,
-      jsonEncode(items.map((e) => e.toJson()).toList()),
-    );
-  }
-}
-
-int calculateStreak(List<WorkoutEntry> workouts) {
-  if (workouts.isEmpty) return 0;
-  final days = workouts.map((e) => dayOnly(e.createdAt)).toSet().toList()
-    ..sort((a, b) => b.compareTo(a));
-
-  var cursor = days.first;
-  var streak = 1;
-  for (var i = 1; i < days.length; i++) {
-    final expected = cursor.subtract(const Duration(days: 1));
-    if (days[i] == expected) {
-      streak++;
-      cursor = days[i];
-    } else {
-      break;
-    }
-  }
-  return streak;
-}
-
-class MainShell extends StatefulWidget {
-  const MainShell({super.key});
+class MainPage extends StatefulWidget {
+  const MainPage({super.key, required this.user});
+  final User user;
 
   @override
-  State<MainShell> createState() => _MainShellState();
+  State<MainPage> createState() => _MainPageState();
 }
 
-class _MainShellState extends State<MainShell> {
+class _MainPageState extends State<MainPage> {
   int index = 0;
-  bool loading = true;
-  final workouts = <WorkoutEntry>[];
-  final weights = <WeightEntry>[];
-  final meals = <MealEntry>[];
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final loadedWorkouts = await LocalStore.loadWorkouts();
-    final loadedWeights = await LocalStore.loadWeights();
-    final loadedMeals = await LocalStore.loadMeals();
-    if (!mounted) return;
-    setState(() {
-      workouts
-        ..clear()
-        ..addAll(loadedWorkouts);
-      weights
-        ..clear()
-        ..addAll(loadedWeights);
-      meals
-        ..clear()
-        ..addAll(loadedMeals);
-      loading = false;
-    });
-  }
-
-  Future<void> _addWorkout(WorkoutEntry entry) async {
-    setState(() => workouts.add(entry));
-    await LocalStore.saveWorkouts(workouts);
-  }
-
-  Future<void> _deleteWorkout(String id) async {
-    setState(() => workouts.removeWhere((e) => e.id == id));
-    await LocalStore.saveWorkouts(workouts);
-  }
-
-  Future<void> _addWeight(WeightEntry entry) async {
-    setState(() => weights.add(entry));
-    await LocalStore.saveWeights(weights);
-  }
-
-  Future<void> _deleteWeight(String id) async {
-    setState(() => weights.removeWhere((e) => e.id == id));
-    await LocalStore.saveWeights(weights);
-  }
-
-  Future<void> _addMeal(MealEntry entry) async {
-    setState(() => meals.add(entry));
-    await LocalStore.saveMeals(meals);
-  }
-
-  Future<void> _deleteMeal(String id) async {
-    setState(() => meals.removeWhere((e) => e.id == id));
-    await LocalStore.saveMeals(meals);
-  }
 
   @override
   Widget build(BuildContext context) {
     final pages = [
-      HomePage(workouts: workouts, weights: weights, meals: meals),
-      WorkoutPage(
-        workouts: workouts,
-        onAdded: _addWorkout,
-        onDeleted: _deleteWorkout,
-      ),
-      MealPage(
-        meals: meals,
-        onAdded: _addMeal,
-        onDeleted: _deleteMeal,
-      ),
-      CalendarPage(workouts: workouts, meals: meals, weights: weights),
-      WeightPage(
-        weights: weights,
-        onAdded: _addWeight,
-        onDeleted: _deleteWeight,
-      ),
-      const SettingsPage(),
+      CloudRecordsPage(uid: widget.user.uid),
+      FriendsPage(user: widget.user),
+      ProfilePage(user: widget.user),
     ];
 
     return Scaffold(
       appBar: AppBar(
-        title: const Row(
+        title: Row(
           children: [
-            CircleAvatar(
-              radius: 17,
-              backgroundColor: Color(0xFF8ED1B2),
-              child: Text('🐱', style: TextStyle(fontSize: 19)),
+            ClipOval(
+              child: Image.asset(
+                'assets/oruso_logo.png',
+                width: 40,
+                height: 40,
+                fit: BoxFit.cover,
+              ),
             ),
-            SizedBox(width: 10),
-            Text('ORUSO', style: TextStyle(fontWeight: FontWeight.w800)),
+            const SizedBox(width: 10),
+            const Text('ORUSO', style: TextStyle(fontWeight: FontWeight.w900)),
           ],
         ),
       ),
-      body: loading
-          ? const Center(child: CircularProgressIndicator())
-          : IndexedStack(index: index, children: pages),
+      body: IndexedStack(index: index, children: pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
         onDestinationSelected: (value) => setState(() => index = value),
-        labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
         destinations: const [
           NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home),
-            label: 'ホーム',
+            icon: Icon(Icons.cloud_outlined),
+            selectedIcon: Icon(Icons.cloud),
+            label: 'クラウド記録',
           ),
           NavigationDestination(
-            icon: Icon(Icons.fitness_center_outlined),
-            selectedIcon: Icon(Icons.fitness_center),
-            label: '筋トレ',
+            icon: Icon(Icons.people_outline),
+            selectedIcon: Icon(Icons.people),
+            label: 'フレンド',
           ),
           NavigationDestination(
-            icon: Icon(Icons.restaurant_outlined),
-            selectedIcon: Icon(Icons.restaurant),
-            label: '食事',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.calendar_month_outlined),
-            selectedIcon: Icon(Icons.calendar_month),
-            label: 'カレンダー',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.monitor_weight_outlined),
-            selectedIcon: Icon(Icons.monitor_weight),
-            label: '体重',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings),
-            label: '設定',
+            icon: Icon(Icons.person_outline),
+            selectedIcon: Icon(Icons.person),
+            label: 'マイページ',
           ),
         ],
       ),
@@ -379,1120 +322,472 @@ class _MainShellState extends State<MainShell> {
   }
 }
 
-class HomePage extends StatelessWidget {
-  const HomePage({
-    super.key,
-    required this.workouts,
-    required this.weights,
-    required this.meals,
-  });
-
-  final List<WorkoutEntry> workouts;
-  final List<WeightEntry> weights;
-  final List<MealEntry> meals;
+class CloudRecordsPage extends StatefulWidget {
+  const CloudRecordsPage({super.key, required this.uid});
+  final String uid;
 
   @override
-  Widget build(BuildContext context) {
-    final latestWeight = weights.isEmpty
-        ? '未記録'
-        : '${weights.last.weight.toStringAsFixed(1)} kg';
-    final today = dayOnly(DateTime.now());
-    final todayWorkouts =
-        workouts.where((e) => dayOnly(e.createdAt) == today).toList();
-    final todayMeals =
-        meals.where((e) => dayOnly(e.createdAt) == today).toList();
-    final streak = calculateStreak(workouts);
-
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text(
-          '今日も一歩、強くなる。',
-          style: Theme.of(context)
-              .textTheme
-              .headlineSmall
-              ?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          '記録で強くなる、つながりで続く。',
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-        const SizedBox(height: 20),
-        Row(
-          children: [
-            Expanded(
-              child: StatCard(
-                title: '筋トレ記録',
-                value: '${workouts.length} 回',
-                icon: Icons.fitness_center,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: StatCard(
-                title: '最新体重',
-                value: latestWeight,
-                icon: Icons.monitor_weight,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: StatCard(
-                title: '今日の食事',
-                value: '${todayMeals.length} 件',
-                icon: Icons.restaurant,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: StatCard(
-                title: '継続日数',
-                value: '$streak 日',
-                icon: Icons.local_fire_department,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 24),
-        Text(
-          '今日のメニュー',
-          style: Theme.of(context)
-              .textTheme
-              .titleLarge
-              ?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 10),
-        if (todayWorkouts.isEmpty)
-          const EmptyCard(
-            icon: Icons.add_circle_outline,
-            title: 'まだ記録がありません',
-            subtitle: '「筋トレ」タブから今日のトレーニングを追加できます。',
-          )
-        else
-          ...todayWorkouts.map(
-            (e) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Card(
-                child: ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.fitness_center),
-                  ),
-                  title: Text(
-                    e.exercise,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text(
-                    '${e.weight.toStringAsFixed(1)} kg × ${e.reps}回 × ${e.sets}セット'
-                    '${e.durationMinutes > 0 ? '\n${e.durationMinutes}分' : ''}',
-                  ),
-                ),
-              ),
-            ),
-          ),
-        const SizedBox(height: 24),
-        Text(
-          '今日の食事',
-          style: Theme.of(context)
-              .textTheme
-              .titleLarge
-              ?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 10),
-        if (todayMeals.isEmpty)
-          const EmptyCard(
-            icon: Icons.restaurant_outlined,
-            title: '食事記録はまだありません',
-            subtitle: '「食事」タブから今日の食事を追加できます。',
-          )
-        else
-          ...todayMeals.map(
-            (e) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Card(
-                child: ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.restaurant),
-                  ),
-                  title: Text(
-                    '${e.mealType}　${e.food}',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text(timeText(e.createdAt)),
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
+  State<CloudRecordsPage> createState() => _CloudRecordsPageState();
 }
 
-class StatCard extends StatelessWidget {
-  const StatCard({
-    super.key,
-    required this.title,
-    required this.value,
-    required this.icon,
-  });
+class _CloudRecordsPageState extends State<CloudRecordsPage> {
+  final workoutController = TextEditingController();
+  final mealController = TextEditingController();
+  final weightController = TextEditingController();
 
-  final String title;
-  final String value;
-  final IconData icon;
+  CollectionReference<Map<String, dynamic>> records(String type) =>
+      FirebaseFirestore.instance
+          .collection('users')
+          .doc(widget.uid)
+          .collection(type);
 
   @override
-  Widget build(BuildContext context) {
+  void dispose() {
+    workoutController.dispose();
+    mealController.dispose();
+    weightController.dispose();
+    super.dispose();
+  }
+
+  Future<void> addRecord(String type, String value) async {
+    final text = value.trim();
+    if (text.isEmpty) return;
+    await records(type).add({
+      'text': text,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Widget recordSection({
+    required String title,
+    required String type,
+    required TextEditingController controller,
+    required String hint,
+    required IconData icon,
+  }) {
     return Card(
+      margin: const EdgeInsets.only(bottom: 14),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, color: Theme.of(context).colorScheme.primary),
-            const SizedBox(height: 14),
-            Text(
-              value,
-              style: Theme.of(context)
-                  .textTheme
-                  .titleLarge
-                  ?.copyWith(fontWeight: FontWeight.bold),
+            Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            TextField(
+              controller: controller,
+              decoration: InputDecoration(
+                hintText: hint,
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  onPressed: () async {
+                    await addRecord(type, controller.text);
+                    controller.clear();
+                  },
+                  icon: const Icon(Icons.add),
+                ),
+              ),
             ),
-            Text(title),
+            const SizedBox(height: 8),
+            StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: records(type)
+                  .orderBy('createdAt', descending: true)
+                  .limit(20)
+                  .snapshots(),
+              builder: (context, snapshot) {
+                final docs = snapshot.data?.docs ?? [];
+                if (docs.isEmpty) return const Text('まだ記録がありません');
+                return Column(
+                  children: docs
+                      .map(
+                        (doc) => ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(icon),
+                          title: Text(doc.data()['text'] as String? ?? ''),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () => doc.reference.delete(),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                );
+              },
+            ),
           ],
         ),
       ),
     );
   }
-}
-
-class EmptyCard extends StatelessWidget {
-  const EmptyCard({
-    super.key,
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(22),
-        child: Column(
-          children: [
-            Icon(
-              icon,
-              size: 42,
-              color: Theme.of(context).colorScheme.primary,
-            ),
-            const SizedBox(height: 12),
-            Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 6),
-            Text(subtitle, textAlign: TextAlign.center),
-          ],
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Text(
+          'クラウド保存',
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
         ),
-      ),
+        const SizedBox(height: 6),
+        const Text('この画面の記録はFirebaseへ保存されます。'),
+        const SizedBox(height: 16),
+        recordSection(
+          title: '筋トレ',
+          type: 'workouts',
+          controller: workoutController,
+          hint: '例：スクワット 40kg 10回×3',
+          icon: Icons.fitness_center,
+        ),
+        recordSection(
+          title: '食事',
+          type: 'meals',
+          controller: mealController,
+          hint: '例：朝食 鶏むね肉・ごはん',
+          icon: Icons.restaurant,
+        ),
+        recordSection(
+          title: '体重',
+          type: 'weights',
+          controller: weightController,
+          hint: '例：73.0kg',
+          icon: Icons.monitor_weight,
+        ),
+      ],
     );
   }
 }
 
-class WorkoutPage extends StatefulWidget {
-  const WorkoutPage({
-    super.key,
-    required this.workouts,
-    required this.onAdded,
-    required this.onDeleted,
-  });
+String friendshipId(String a, String b) {
+  final values = [a, b]..sort();
+  return '${values[0]}_${values[1]}';
+}
 
-  final List<WorkoutEntry> workouts;
-  final ValueChanged<WorkoutEntry> onAdded;
-  final ValueChanged<String> onDeleted;
+class FriendsPage extends StatefulWidget {
+  const FriendsPage({super.key, required this.user});
+  final User user;
 
   @override
-  State<WorkoutPage> createState() => _WorkoutPageState();
+  State<FriendsPage> createState() => _FriendsPageState();
 }
 
-class _WorkoutPageState extends State<WorkoutPage> {
-  final exercise = TextEditingController();
-  final weight = TextEditingController();
-  final reps = TextEditingController();
-  final sets = TextEditingController();
-  final duration = TextEditingController();
-  final memo = TextEditingController();
-
-  WorkoutEntry? get previousEntry {
-    final name = exercise.text.trim().toLowerCase();
-    if (name.isEmpty) return null;
-    final matches = widget.workouts
-        .where((e) => e.exercise.trim().toLowerCase() == name)
-        .toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return matches.isEmpty ? null : matches.first;
-  }
-
-  double? get currentPr {
-    final name = exercise.text.trim().toLowerCase();
-    if (name.isEmpty) return null;
-    final matches = widget.workouts
-        .where((e) => e.exercise.trim().toLowerCase() == name)
-        .toList();
-    if (matches.isEmpty) return null;
-    return matches.map((e) => e.weight).reduce((a, b) => a > b ? a : b);
-  }
-
-  void addWorkout() {
-    final w = double.tryParse(weight.text);
-    final r = int.tryParse(reps.text);
-    final s = int.tryParse(sets.text);
-    final d = int.tryParse(duration.text) ?? 0;
-
-    if (exercise.text.trim().isEmpty || w == null || r == null || s == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('種目・重量・回数・セット数を入力してください。')),
-      );
-      return;
-    }
-
-    final oldPr = currentPr;
-    final isPr = oldPr == null || w > oldPr;
-
-    widget.onAdded(
-      WorkoutEntry(
-        id: DateTime.now().microsecondsSinceEpoch.toString(),
-        exercise: exercise.text.trim(),
-        weight: w,
-        reps: r,
-        sets: s,
-        durationMinutes: d,
-        memo: memo.text.trim(),
-        createdAt: DateTime.now(),
-      ),
-    );
-
-    if (isPr) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('自己ベスト更新！ ${w.toStringAsFixed(1)} kg')),
-      );
-    }
-
-    weight.clear();
-    reps.clear();
-    sets.clear();
-    duration.clear();
-    memo.clear();
-    setState(() {});
-    FocusScope.of(context).unfocus();
-  }
+class _FriendsPageState extends State<FriendsPage> {
+  final idController = TextEditingController();
+  Map<String, dynamic>? foundUser;
 
   @override
   void dispose() {
-    exercise.dispose();
-    weight.dispose();
-    reps.dispose();
-    sets.dispose();
-    duration.dispose();
-    memo.dispose();
+    idController.dispose();
     super.dispose();
+  }
+
+  void message(String text) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<void> searchUser() async {
+    final id = normalizeId(idController.text);
+    final username =
+        await FirebaseFirestore.instance.collection('usernames').doc(id).get();
+    if (!username.exists) {
+      message('ユーザーが見つかりません。');
+      setState(() => foundUser = null);
+      return;
+    }
+
+    final uid = username.data()!['uid'] as String;
+    final user = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+    setState(() => foundUser = user.data());
+  }
+
+  Future<void> sendRequest() async {
+    final receiverUid = foundUser?['uid'] as String?;
+    if (receiverUid == null || receiverUid == widget.user.uid) return;
+
+    final requestId = '${widget.user.uid}_$receiverUid';
+    await FirebaseFirestore.instance.collection('friendRequests').doc(requestId).set({
+      'senderUid': widget.user.uid,
+      'receiverUid': receiverUid,
+      'status': 'pending',
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+    message('フレンド申請を送りました。');
+  }
+
+  Future<void> accept(
+    String requestId,
+    Map<String, dynamic> request,
+  ) async {
+    final sender = request['senderUid'] as String;
+    final receiver = request['receiverUid'] as String;
+    final batch = FirebaseFirestore.instance.batch();
+    batch.update(
+      FirebaseFirestore.instance.collection('friendRequests').doc(requestId),
+      {'status': 'accepted'},
+    );
+    batch.set(
+      FirebaseFirestore.instance
+          .collection('friendships')
+          .doc(friendshipId(sender, receiver)),
+      {
+        'members': [sender, receiver],
+        'createdAt': FieldValue.serverTimestamp(),
+      },
+    );
+    await batch.commit();
   }
 
   @override
   Widget build(BuildContext context) {
-    final sorted = [...widget.workouts]
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    final previous = previousEntry;
-    final pr = currentPr;
+    final requestStream = FirebaseFirestore.instance
+        .collection('friendRequests')
+        .where('receiverUid', isEqualTo: widget.user.uid)
+        .where('status', isEqualTo: 'pending')
+        .snapshots();
+
+    final friendStream = FirebaseFirestore.instance
+        .collection('friendships')
+        .where('members', arrayContains: widget.user.uid)
+        .snapshots();
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         Text(
-          '筋トレを記録',
-          style: Theme.of(context)
-              .textTheme
-              .headlineSmall
-              ?.copyWith(fontWeight: FontWeight.bold),
+          'フレンド',
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
         ),
         const SizedBox(height: 14),
         TextField(
-          controller: exercise,
-          onChanged: (_) => setState(() {}),
-          decoration: const InputDecoration(
-            labelText: '種目',
-            hintText: '例：ベンチプレス',
-            border: OutlineInputBorder(),
+          controller: idController,
+          textCapitalization: TextCapitalization.characters,
+          decoration: InputDecoration(
+            labelText: 'ORUSO IDで検索',
+            border: const OutlineInputBorder(),
+            suffixIcon: IconButton(
+              onPressed: searchUser,
+              icon: const Icon(Icons.search),
+            ),
           ),
         ),
-        if (previous != null || pr != null) ...[
+        if (foundUser != null) ...[
           const SizedBox(height: 10),
           Card(
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      previous == null
-                          ? '前回記録なし'
-                          : '前回：${previous.weight.toStringAsFixed(1)} kg × ${previous.reps}回 × ${previous.sets}セット',
-                    ),
-                  ),
-                  if (pr != null)
-                    Chip(
-                      avatar: const Icon(Icons.emoji_events, size: 18),
-                      label: Text('PR ${pr.toStringAsFixed(1)} kg'),
-                    ),
-                ],
+            child: ListTile(
+              leading: const CircleAvatar(child: Icon(Icons.person)),
+              title: Text(foundUser!['nickname'] as String? ?? 'ORUSOユーザー'),
+              subtitle: Text(foundUser!['userId'] as String? ?? ''),
+              trailing: FilledButton(
+                onPressed: sendRequest,
+                child: const Text('申請'),
               ),
             ),
           ),
         ],
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: weight,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
-                  labelText: '重量（kg）',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: TextField(
-                controller: reps,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: '回数',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: sets,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'セット数',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: TextField(
-                controller: duration,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: '時間（分・任意）',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        TextField(
-          controller: memo,
-          maxLines: 3,
-          decoration: const InputDecoration(
-            labelText: 'メモ（任意）',
-            hintText: 'フォーム、体調、次回の目標など',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          onPressed: addWorkout,
-          icon: const Icon(Icons.add),
-          label: const Text('記録を追加'),
-        ),
-        const SizedBox(height: 24),
-        Text(
-          '記録一覧',
-          style: Theme.of(context)
-              .textTheme
-              .titleLarge
-              ?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 10),
-        if (sorted.isEmpty)
-          const EmptyCard(
-            icon: Icons.fitness_center,
-            title: '筋トレ記録はまだありません',
-            subtitle: '最初のトレーニングを登録しましょう。',
-          )
-        else
-          ...sorted.map((e) {
-            final exerciseMax = widget.workouts
-                .where(
-                  (x) =>
-                      x.exercise.trim().toLowerCase() ==
-                      e.exercise.trim().toLowerCase(),
-                )
-                .map((x) => x.weight)
-                .reduce((a, b) => a > b ? a : b);
-            final isPr = e.weight == exerciseMax;
-
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Card(
-                child: ListTile(
-                  leading: CircleAvatar(
-                    child: Icon(
-                      isPr ? Icons.emoji_events : Icons.fitness_center,
-                    ),
-                  ),
-                  title: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          e.exercise,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+        const SizedBox(height: 22),
+        const Text('届いた申請', style: TextStyle(fontWeight: FontWeight.bold)),
+        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: requestStream,
+          builder: (context, snapshot) {
+            final docs = snapshot.data?.docs ?? [];
+            if (docs.isEmpty) return const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Text('申請はありません'),
+            );
+            return Column(
+              children: docs
+                  .map(
+                    (doc) => Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.person_add),
+                        title: const Text('フレンド申請'),
+                        trailing: FilledButton(
+                          onPressed: () => accept(doc.id, doc.data()),
+                          child: const Text('承認'),
                         ),
                       ),
-                      if (isPr)
-                        const Chip(
-                          visualDensity: VisualDensity.compact,
-                          label: Text('PR'),
-                        ),
-                    ],
-                  ),
-                  subtitle: Text(
-                    '${e.weight.toStringAsFixed(1)} kg × ${e.reps}回 × ${e.sets}セット'
-                    '\n総負荷量：${e.volume.toStringAsFixed(0)} kg'
-                    '${e.durationMinutes > 0 ? '\n時間：${e.durationMinutes}分' : ''}'
-                    '${e.memo.isNotEmpty ? '\nメモ：${e.memo}' : ''}',
-                  ),
-                  isThreeLine: true,
-                  trailing: IconButton(
-                    tooltip: '削除',
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => widget.onDeleted(e.id),
-                  ),
-                ),
-              ),
+                    ),
+                  )
+                  .toList(),
             );
-          }),
-      ],
-    );
-  }
-}
-
-class MealPage extends StatefulWidget {
-  const MealPage({
-    super.key,
-    required this.meals,
-    required this.onAdded,
-    required this.onDeleted,
-  });
-
-  final List<MealEntry> meals;
-  final ValueChanged<MealEntry> onAdded;
-  final ValueChanged<String> onDeleted;
-
-  @override
-  State<MealPage> createState() => _MealPageState();
-}
-
-class _MealPageState extends State<MealPage> {
-  final food = TextEditingController();
-  final memo = TextEditingController();
-  String mealType = '朝食';
-
-  void addMeal() {
-    if (food.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('食べたものを入力してください。')),
-      );
-      return;
-    }
-
-    widget.onAdded(
-      MealEntry(
-        id: DateTime.now().microsecondsSinceEpoch.toString(),
-        mealType: mealType,
-        food: food.text.trim(),
-        memo: memo.text.trim(),
-        createdAt: DateTime.now(),
-      ),
-    );
-
-    food.clear();
-    memo.clear();
-    FocusScope.of(context).unfocus();
-  }
-
-  @override
-  void dispose() {
-    food.dispose();
-    memo.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final sorted = [...widget.meals]
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text(
-          '食事を記録',
-          style: Theme.of(context)
-              .textTheme
-              .headlineSmall
-              ?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 14),
-        DropdownButtonFormField<String>(
-          initialValue: mealType,
-          decoration: const InputDecoration(
-            labelText: '食事の種類',
-            border: OutlineInputBorder(),
-          ),
-          items: const [
-            DropdownMenuItem(value: '朝食', child: Text('朝食')),
-            DropdownMenuItem(value: '昼食', child: Text('昼食')),
-            DropdownMenuItem(value: '夕食', child: Text('夕食')),
-            DropdownMenuItem(value: '間食', child: Text('間食')),
-            DropdownMenuItem(value: 'その他', child: Text('その他')),
-          ],
-          onChanged: (value) {
-            if (value != null) setState(() => mealType = value);
           },
         ),
-        const SizedBox(height: 10),
-        TextField(
-          controller: food,
-          decoration: const InputDecoration(
-            labelText: '食べたもの',
-            hintText: '例：鶏むね肉、白ごはん、サラダ',
-            border: OutlineInputBorder(),
-          ),
+        const SizedBox(height: 22),
+        const Text('フレンド一覧', style: TextStyle(fontWeight: FontWeight.bold)),
+        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: friendStream,
+          builder: (context, snapshot) {
+            final docs = snapshot.data?.docs ?? [];
+            if (docs.isEmpty) return const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Text('フレンドはまだいません'),
+            );
+            return Column(
+              children: docs.map((doc) {
+                final members = List<String>.from(doc.data()['members'] as List);
+                final other = members.firstWhere((uid) => uid != widget.user.uid);
+                return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                  future: FirebaseFirestore.instance.collection('users').doc(other).get(),
+                  builder: (context, snap) {
+                    final data = snap.data?.data();
+                    return Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.people),
+                        title: Text(data?['nickname'] as String? ?? '読み込み中'),
+                        subtitle: Text(data?['userId'] as String? ?? ''),
+                      ),
+                    );
+                  },
+                );
+              }).toList(),
+            );
+          },
         ),
-        const SizedBox(height: 10),
-        TextField(
-          controller: memo,
-          maxLines: 3,
-          decoration: const InputDecoration(
-            labelText: 'メモ（任意）',
-            hintText: '量、体調、感想など',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          onPressed: addMeal,
-          icon: const Icon(Icons.add),
-          label: const Text('食事を追加'),
-        ),
-        const SizedBox(height: 24),
-        Text(
-          '食事記録',
-          style: Theme.of(context)
-              .textTheme
-              .titleLarge
-              ?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 10),
-        if (sorted.isEmpty)
-          const EmptyCard(
-            icon: Icons.restaurant,
-            title: '食事記録はまだありません',
-            subtitle: '最初の食事を登録しましょう。',
-          )
-        else
-          ...sorted.map(
-            (e) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Card(
-                child: ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.restaurant),
-                  ),
-                  title: Text(
-                    '${e.mealType}　${e.food}',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text(
-                    '${e.createdAt.year}/${e.createdAt.month}/${e.createdAt.day} ${timeText(e.createdAt)}'
-                    '${e.memo.isEmpty ? '' : '\n${e.memo}'}',
-                  ),
-                  isThreeLine: e.memo.isNotEmpty,
-                  trailing: IconButton(
-                    tooltip: '削除',
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => widget.onDeleted(e.id),
-                  ),
-                ),
-              ),
-            ),
-          ),
       ],
     );
   }
 }
 
-class CalendarPage extends StatefulWidget {
-  const CalendarPage({
-    super.key,
-    required this.workouts,
-    required this.meals,
-    required this.weights,
-  });
-
-  final List<WorkoutEntry> workouts;
-  final List<MealEntry> meals;
-  final List<WeightEntry> weights;
+class ProfilePage extends StatefulWidget {
+  const ProfilePage({super.key, required this.user});
+  final User user;
 
   @override
-  State<CalendarPage> createState() => _CalendarPageState();
+  State<ProfilePage> createState() => _ProfilePageState();
 }
 
-class _CalendarPageState extends State<CalendarPage> {
-  late DateTime selectedDate;
+class _ProfilePageState extends State<ProfilePage> {
+  final nicknameController = TextEditingController();
+  final bioController = TextEditingController();
+  String visibility = 'private';
+  String userId = '';
+  bool loaded = false;
+
+  DocumentReference<Map<String, dynamic>> get ref =>
+      FirebaseFirestore.instance.collection('users').doc(widget.user.uid);
 
   @override
   void initState() {
     super.initState();
-    selectedDate = dayOnly(DateTime.now());
+    load();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final daysInMonth = DateUtils.getDaysInMonth(now.year, now.month);
-    final firstDay = DateTime(now.year, now.month, 1);
-    final leadingBlankDays = firstDay.weekday % 7;
-    final totalCells = leadingBlankDays + daysInMonth;
-
-    final monthlyCount = widget.workouts
-        .where(
-          (w) =>
-              w.createdAt.year == now.year &&
-              w.createdAt.month == now.month,
-        )
-        .length;
-
-    final selectedWorkouts = widget.workouts
-        .where((e) => dayOnly(e.createdAt) == selectedDate)
-        .toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-
-    final selectedMeals = widget.meals
-        .where((e) => dayOnly(e.createdAt) == selectedDate)
-        .toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-
-    final selectedWeights = widget.weights
-        .where((e) => dayOnly(e.createdAt) == selectedDate)
-        .toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-
-    const weekdays = ['日', '月', '火', '水', '木', '金', '土'];
-
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text(
-          '${now.year}年 ${now.month}月',
-          style: Theme.of(context)
-              .textTheme
-              .headlineSmall
-              ?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 14),
-        Row(
-          children: weekdays
-              .map(
-                (day) => Expanded(
-                  child: Center(
-                    child: Text(
-                      day,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                ),
-              )
-              .toList(),
-        ),
-        const SizedBox(height: 8),
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 7,
-            mainAxisSpacing: 7,
-            crossAxisSpacing: 7,
-          ),
-          itemCount: totalCells,
-          itemBuilder: (_, index) {
-            if (index < leadingBlankDays) {
-              return const SizedBox.shrink();
-            }
-
-            final day = index - leadingBlankDays + 1;
-            final date = DateTime(now.year, now.month, day);
-            final trained = widget.workouts.any(
-              (w) =>
-                  w.createdAt.year == now.year &&
-                  w.createdAt.month == now.month &&
-                  w.createdAt.day == day,
-            );
-            final hasMeal = widget.meals.any(
-              (m) =>
-                  m.createdAt.year == now.year &&
-                  m.createdAt.month == now.month &&
-                  m.createdAt.day == day,
-            );
-            final hasWeight = widget.weights.any(
-              (w) =>
-                  w.createdAt.year == now.year &&
-                  w.createdAt.month == now.month &&
-                  w.createdAt.day == day,
-            );
-
-            final isToday = now.year == date.year &&
-                now.month == date.month &&
-                now.day == date.day;
-            final isSelected = selectedDate == dayOnly(date);
-
-            return InkWell(
-              borderRadius: BorderRadius.circular(12),
-              onTap: () => setState(() => selectedDate = dayOnly(date)),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: trained
-                      ? Theme.of(context).colorScheme.primaryContainer
-                      : const Color(0xFF1A2221),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: isSelected
-                        ? Theme.of(context).colorScheme.primary
-                        : isToday
-                            ? Theme.of(context)
-                                .colorScheme
-                                .primary
-                                .withValues(alpha: 0.55)
-                            : Colors.transparent,
-                    width: isSelected ? 2.5 : 1.5,
-                  ),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      '$day',
-                      style: TextStyle(
-                        fontWeight: trained || isToday || isSelected
-                            ? FontWeight.bold
-                            : FontWeight.normal,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        if (trained)
-                          const Icon(Icons.fitness_center, size: 9),
-                        if (hasMeal)
-                          const Padding(
-                            padding: EdgeInsets.only(left: 2),
-                            child: Icon(Icons.restaurant, size: 9),
-                          ),
-                        if (hasWeight)
-                          const Padding(
-                            padding: EdgeInsets.only(left: 2),
-                            child: Icon(Icons.monitor_weight, size: 9),
-                          ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        ),
-        const SizedBox(height: 18),
-        Text('今月の筋トレ：$monthlyCount回'),
-        const SizedBox(height: 24),
-        Text(
-          '${selectedDate.year}/${selectedDate.month}/${selectedDate.day} の記録',
-          style: Theme.of(context)
-              .textTheme
-              .titleLarge
-              ?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 12),
-        if (selectedWorkouts.isEmpty &&
-            selectedMeals.isEmpty &&
-            selectedWeights.isEmpty)
-          const EmptyCard(
-            icon: Icons.event_note,
-            title: 'この日の記録はありません',
-            subtitle: '筋トレ・食事・体重を記録するとここに表示されます。',
-          ),
-        if (selectedWorkouts.isNotEmpty) ...[
-          Text(
-            '筋トレ',
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          ...selectedWorkouts.map(
-            (e) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Card(
-                child: ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.fitness_center),
-                  ),
-                  title: Text(
-                    e.exercise,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text(
-                    '${e.weight.toStringAsFixed(1)} kg × ${e.reps}回 × ${e.sets}セット'
-                    '${e.durationMinutes > 0 ? '\n${e.durationMinutes}分' : ''}'
-                    '${e.memo.isNotEmpty ? '\n${e.memo}' : ''}',
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-        ],
-        if (selectedMeals.isNotEmpty) ...[
-          Text(
-            '食事',
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          ...selectedMeals.map(
-            (e) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Card(
-                child: ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.restaurant),
-                  ),
-                  title: Text(
-                    '${e.mealType}　${e.food}',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text(
-                    '${timeText(e.createdAt)}'
-                    '${e.memo.isNotEmpty ? '\n${e.memo}' : ''}',
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-        ],
-        if (selectedWeights.isNotEmpty) ...[
-          Text(
-            '体重',
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          ...selectedWeights.map(
-            (e) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Card(
-                child: ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.monitor_weight),
-                  ),
-                  title: Text(
-                    '${e.weight.toStringAsFixed(1)} kg',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text(timeText(e.createdAt)),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ],
-    );
+  Future<void> load() async {
+    final snap = await ref.get();
+    final data = snap.data() ?? {};
+    nicknameController.text = data['nickname'] as String? ?? '';
+    bioController.text = data['bio'] as String? ?? '';
+    visibility = data['visibility'] as String? ?? 'private';
+    userId = data['userId'] as String? ?? '';
+    if (mounted) setState(() => loaded = true);
   }
-}
 
-class WeightPage extends StatefulWidget {
-  const WeightPage({
-    super.key,
-    required this.weights,
-    required this.onAdded,
-    required this.onDeleted,
-  });
-
-  final List<WeightEntry> weights;
-  final ValueChanged<WeightEntry> onAdded;
-  final ValueChanged<String> onDeleted;
-
-  @override
-  State<WeightPage> createState() => _WeightPageState();
-}
-
-class _WeightPageState extends State<WeightPage> {
-  final controller = TextEditingController();
-
-  void addWeight() {
-    final value = double.tryParse(controller.text);
-    if (value == null) {
+  Future<void> save() async {
+    await ref.update({
+      'nickname': nicknameController.text.trim(),
+      'bio': bioController.text.trim(),
+      'visibility': visibility,
+    });
+    if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('体重を数字で入力してください。')),
+        const SnackBar(content: Text('プロフィールを保存しました。')),
       );
-      return;
     }
-
-    widget.onAdded(
-      WeightEntry(
-        id: DateTime.now().microsecondsSinceEpoch.toString(),
-        weight: value,
-        createdAt: DateTime.now(),
-      ),
-    );
-
-    controller.clear();
-    FocusScope.of(context).unfocus();
   }
 
   @override
   void dispose() {
-    controller.dispose();
+    nicknameController.dispose();
+    bioController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final sorted = [...widget.weights]
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    if (!loaded) return const Center(child: CircularProgressIndicator());
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        Text(
-          '体重を記録',
-          style: Theme.of(context)
-              .textTheme
-              .headlineSmall
-              ?.copyWith(fontWeight: FontWeight.bold),
+        Center(
+          child: ClipOval(
+            child: Image.asset(
+              'assets/oruso_logo.png',
+              width: 120,
+              height: 120,
+              fit: BoxFit.cover,
+            ),
+          ),
         ),
         const SizedBox(height: 14),
+        SelectableText(
+          userId,
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
+        const SizedBox(height: 18),
         TextField(
-          controller: controller,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          controller: nicknameController,
           decoration: const InputDecoration(
-            labelText: '体重（kg）',
+            labelText: 'ニックネーム',
             border: OutlineInputBorder(),
           ),
         ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: bioController,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            labelText: '自己紹介',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 10),
+        DropdownButtonFormField<String>(
+          initialValue: visibility,
+          decoration: const InputDecoration(
+            labelText: '公開範囲',
+            border: OutlineInputBorder(),
+          ),
+          items: const [
+            DropdownMenuItem(value: 'private', child: Text('自分だけ')),
+            DropdownMenuItem(value: 'friends', child: Text('フレンドのみ')),
+          ],
+          onChanged: (value) {
+            if (value != null) setState(() => visibility = value);
+          },
+        ),
         const SizedBox(height: 12),
         FilledButton.icon(
-          onPressed: addWeight,
-          icon: const Icon(Icons.add),
-          label: const Text('体重を追加'),
+          onPressed: save,
+          icon: const Icon(Icons.save),
+          label: const Text('保存'),
         ),
-        const SizedBox(height: 24),
-        if (sorted.isEmpty)
-          const EmptyCard(
-            icon: Icons.monitor_weight,
-            title: '体重記録はまだありません',
-            subtitle: '今日の体重を登録しましょう。',
-          )
-        else
-          ...sorted.map(
-            (e) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Card(
-                child: ListTile(
-                  leading: const Icon(Icons.monitor_weight),
-                  title: Text(
-                    '${e.weight.toStringAsFixed(1)} kg',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text(
-                    '${e.createdAt.year}/${e.createdAt.month}/${e.createdAt.day}',
-                  ),
-                  trailing: IconButton(
-                    tooltip: '削除',
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => widget.onDeleted(e.id),
-                  ),
-                ),
-              ),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: FirebaseAuth.instance.signOut,
+          icon: const Icon(Icons.logout),
+          label: const Text('ログアウト'),
+        ),
+        const SizedBox(height: 16),
+        const Card(
+          child: ListTile(
+            leading: Icon(Icons.security),
+            title: Text('通信の安全対策'),
+            subtitle: Text(
+              'Firebase AuthenticationとFirestore Security Rulesでアクセスを制限します。',
             ),
           ),
-      ],
-    );
-  }
-}
-
-class SettingsPage extends StatelessWidget {
-  const SettingsPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text(
-          '設定',
-          style: Theme.of(context)
-              .textTheme
-              .headlineSmall
-              ?.copyWith(fontWeight: FontWeight.bold),
         ),
-        const SizedBox(height: 12),
-        const Card(
-          child: ListTile(
-            leading: Icon(Icons.dark_mode),
-            title: Text('ダークモード'),
-            trailing: Switch(value: true, onChanged: null),
-          ),
-        ),
-        const SizedBox(height: 8),
-        const Card(
-          child: ListTile(
-            leading: Icon(Icons.save),
-            title: Text('端末内保存'),
-            subtitle: Text('筋トレ・体重・食事を自動保存します'),
-            trailing: Icon(Icons.check_circle),
-          ),
-        ),
-        const SizedBox(height: 8),
         const Card(
           child: ListTile(
             leading: Icon(Icons.info_outline),
-            title: Text('ORUSO Ver.0.5'),
-            subtitle: Text('曜日表示と日別記録表示に対応'),
+            title: Text('ORUSO Ver.0.6'),
+            subtitle: Text('公式アイコン・IDログイン・クラウド・フレンド'),
           ),
         ),
       ],
