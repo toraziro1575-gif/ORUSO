@@ -48,6 +48,10 @@ jobs:
                   'plugins {\n    id("com.google.gms.google-services")',
                   1,
               )
+          text = text.replace(
+              'applicationId = "com.oruso.oruso"',
+              'applicationId = "com.oruso.app"',
+          )
           app.write_text(text)
           PY
 
