@@ -87,12 +87,10 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Future<String> reserveId() async {
-    for (var i = 0; i < 15; i++) {
-      final id = createRandomId();
-      final snap = await FirebaseFirestore.instance.collection('usernames').doc(id).get();
-      if (!snap.exists) return id;
-    }
-    throw Exception('IDの発行に失敗しました。');
+    // 登録前はまだ未ログインのため、Firestoreへ問い合わせずにIDを生成します。
+    // 8文字のランダムIDは重複確率が非常に低く、万一重複した場合は
+    // Firebase Authentication側のエラーとして登録をやり直します。
+    return createRandomId();
   }
 
   Future<void> register() async {
