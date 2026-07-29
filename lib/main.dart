@@ -33,6 +33,9 @@ class OrusoApp extends StatelessWidget {
 
 DateTime dayOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
+String timeText(DateTime d) =>
+    '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+
 class WorkoutEntry {
   WorkoutEntry({
     required this.id,
@@ -40,6 +43,8 @@ class WorkoutEntry {
     required this.weight,
     required this.reps,
     required this.sets,
+    required this.durationMinutes,
+    required this.memo,
     required this.createdAt,
   });
 
@@ -48,7 +53,11 @@ class WorkoutEntry {
   final double weight;
   final int reps;
   final int sets;
+  final int durationMinutes;
+  final String memo;
   final DateTime createdAt;
+
+  double get volume => weight * reps * sets;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -56,6 +65,8 @@ class WorkoutEntry {
         'weight': weight,
         'reps': reps,
         'sets': sets,
+        'durationMinutes': durationMinutes,
+        'memo': memo,
         'createdAt': createdAt.toIso8601String(),
       };
 
@@ -65,6 +76,8 @@ class WorkoutEntry {
         weight: (json['weight'] as num).toDouble(),
         reps: json['reps'] as int,
         sets: json['sets'] as int,
+        durationMinutes: (json['durationMinutes'] as num?)?.toInt() ?? 0,
+        memo: json['memo'] as String? ?? '',
         createdAt: DateTime.parse(json['createdAt'] as String),
       );
 }
@@ -215,9 +228,6 @@ int calculateStreak(List<WorkoutEntry> workouts) {
   }
   return streak;
 }
-
-String timeText(DateTime d) =>
-    '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
 
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
@@ -477,7 +487,8 @@ class HomePage extends StatelessWidget {
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                   subtitle: Text(
-                    '${e.weight.toStringAsFixed(1)} kg × ${e.reps}回 × ${e.sets}セット',
+                    '${e.weight.toStringAsFixed(1)} kg × ${e.reps}回 × ${e.sets}セット'
+                    '${e.durationMinutes > 0 ? '\n${e.durationMinutes}分' : ''}',
                   ),
                 ),
               ),
@@ -614,17 +625,44 @@ class _WorkoutPageState extends State<WorkoutPage> {
   final weight = TextEditingController();
   final reps = TextEditingController();
   final sets = TextEditingController();
+  final duration = TextEditingController();
+  final memo = TextEditingController();
+
+  WorkoutEntry? get previousEntry {
+    final name = exercise.text.trim().toLowerCase();
+    if (name.isEmpty) return null;
+    final matches = widget.workouts
+        .where((e) => e.exercise.trim().toLowerCase() == name)
+        .toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return matches.isEmpty ? null : matches.first;
+  }
+
+  double? get currentPr {
+    final name = exercise.text.trim().toLowerCase();
+    if (name.isEmpty) return null;
+    final matches = widget.workouts
+        .where((e) => e.exercise.trim().toLowerCase() == name)
+        .toList();
+    if (matches.isEmpty) return null;
+    return matches.map((e) => e.weight).reduce((a, b) => a > b ? a : b);
+  }
 
   void addWorkout() {
     final w = double.tryParse(weight.text);
     final r = int.tryParse(reps.text);
     final s = int.tryParse(sets.text);
+    final d = int.tryParse(duration.text) ?? 0;
+
     if (exercise.text.trim().isEmpty || w == null || r == null || s == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('種目・重量・回数・セット数を入力してください。')),
       );
       return;
     }
+
+    final oldPr = currentPr;
+    final isPr = oldPr == null || w > oldPr;
 
     widget.onAdded(
       WorkoutEntry(
@@ -633,14 +671,24 @@ class _WorkoutPageState extends State<WorkoutPage> {
         weight: w,
         reps: r,
         sets: s,
+        durationMinutes: d,
+        memo: memo.text.trim(),
         createdAt: DateTime.now(),
       ),
     );
 
-    exercise.clear();
+    if (isPr) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('自己ベスト更新！ ${w.toStringAsFixed(1)} kg')),
+      );
+    }
+
     weight.clear();
     reps.clear();
     sets.clear();
+    duration.clear();
+    memo.clear();
+    setState(() {});
     FocusScope.of(context).unfocus();
   }
 
@@ -650,6 +698,8 @@ class _WorkoutPageState extends State<WorkoutPage> {
     weight.dispose();
     reps.dispose();
     sets.dispose();
+    duration.dispose();
+    memo.dispose();
     super.dispose();
   }
 
@@ -657,6 +707,8 @@ class _WorkoutPageState extends State<WorkoutPage> {
   Widget build(BuildContext context) {
     final sorted = [...widget.workouts]
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final previous = previousEntry;
+    final pr = currentPr;
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -671,19 +723,44 @@ class _WorkoutPageState extends State<WorkoutPage> {
         const SizedBox(height: 14),
         TextField(
           controller: exercise,
+          onChanged: (_) => setState(() {}),
           decoration: const InputDecoration(
             labelText: '種目',
             hintText: '例：ベンチプレス',
             border: OutlineInputBorder(),
           ),
         ),
+        if (previous != null || pr != null) ...[
+          const SizedBox(height: 10),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      previous == null
+                          ? '前回記録なし'
+                          : '前回：${previous.weight.toStringAsFixed(1)} kg × ${previous.reps}回 × ${previous.sets}セット',
+                    ),
+                  ),
+                  if (pr != null)
+                    Chip(
+                      avatar: const Icon(Icons.emoji_events, size: 18),
+                      label: Text('PR ${pr.toStringAsFixed(1)} kg'),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 10),
         Row(
           children: [
             Expanded(
               child: TextField(
                 controller: weight,
-                keyboardType: TextInputType.number,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
                 decoration: const InputDecoration(
                   labelText: '重量（kg）',
                   border: OutlineInputBorder(),
@@ -704,11 +781,38 @@ class _WorkoutPageState extends State<WorkoutPage> {
           ],
         ),
         const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: sets,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'セット数',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: duration,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: '時間（分・任意）',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
         TextField(
-          controller: sets,
-          keyboardType: TextInputType.number,
+          controller: memo,
+          maxLines: 3,
           decoration: const InputDecoration(
-            labelText: 'セット数',
+            labelText: 'メモ（任意）',
+            hintText: 'フォーム、体調、次回の目標など',
             border: OutlineInputBorder(),
           ),
         ),
@@ -734,21 +838,48 @@ class _WorkoutPageState extends State<WorkoutPage> {
             subtitle: '最初のトレーニングを登録しましょう。',
           )
         else
-          ...sorted.map(
-            (e) => Padding(
+          ...sorted.map((e) {
+            final exerciseMax = widget.workouts
+                .where(
+                  (x) =>
+                      x.exercise.trim().toLowerCase() ==
+                      e.exercise.trim().toLowerCase(),
+                )
+                .map((x) => x.weight)
+                .reduce((a, b) => a > b ? a : b);
+            final isPr = e.weight == exerciseMax;
+
+            return Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Card(
                 child: ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.fitness_center),
+                  leading: CircleAvatar(
+                    child: Icon(
+                      isPr ? Icons.emoji_events : Icons.fitness_center,
+                    ),
                   ),
-                  title: Text(
-                    e.exercise,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  title: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          e.exercise,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      if (isPr)
+                        const Chip(
+                          visualDensity: VisualDensity.compact,
+                          label: Text('PR'),
+                        ),
+                    ],
                   ),
                   subtitle: Text(
-                    '${e.weight.toStringAsFixed(1)} kg × ${e.reps}回 × ${e.sets}セット',
+                    '${e.weight.toStringAsFixed(1)} kg × ${e.reps}回 × ${e.sets}セット'
+                    '\n総負荷量：${e.volume.toStringAsFixed(0)} kg'
+                    '${e.durationMinutes > 0 ? '\n時間：${e.durationMinutes}分' : ''}'
+                    '${e.memo.isNotEmpty ? '\nメモ：${e.memo}' : ''}',
                   ),
+                  isThreeLine: true,
                   trailing: IconButton(
                     tooltip: '削除',
                     icon: const Icon(Icons.delete_outline),
@@ -756,8 +887,8 @@ class _WorkoutPageState extends State<WorkoutPage> {
                   ),
                 ),
               ),
-            ),
-          ),
+            );
+          }),
       ],
     );
   }
@@ -1137,8 +1268,8 @@ class SettingsPage extends StatelessWidget {
         const Card(
           child: ListTile(
             leading: Icon(Icons.info_outline),
-            title: Text('ORUSO Ver.0.3'),
-            subtitle: Text('食事記録に対応'),
+            title: Text('ORUSO Ver.0.4'),
+            subtitle: Text('前回重量・メモ・時間・PR表示に対応'),
           ),
         ),
       ],
