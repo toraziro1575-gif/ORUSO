@@ -31,6 +31,8 @@ class OrusoApp extends StatelessWidget {
   }
 }
 
+DateTime dayOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
 class WorkoutEntry {
   WorkoutEntry({
     required this.id,
@@ -91,9 +93,42 @@ class WeightEntry {
       );
 }
 
+class MealEntry {
+  MealEntry({
+    required this.id,
+    required this.mealType,
+    required this.food,
+    required this.memo,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String mealType;
+  final String food;
+  final String memo;
+  final DateTime createdAt;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'mealType': mealType,
+        'food': food,
+        'memo': memo,
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory MealEntry.fromJson(Map<String, dynamic> json) => MealEntry(
+        id: json['id'] as String,
+        mealType: json['mealType'] as String,
+        food: json['food'] as String,
+        memo: json['memo'] as String? ?? '',
+        createdAt: DateTime.parse(json['createdAt'] as String),
+      );
+}
+
 class LocalStore {
   static const _workoutsKey = 'oruso_workouts_v1';
   static const _weightsKey = 'oruso_weights_v1';
+  static const _mealsKey = 'oruso_meals_v1';
 
   static Future<List<WorkoutEntry>> loadWorkouts() async {
     final prefs = await SharedPreferences.getInstance();
@@ -123,6 +158,20 @@ class LocalStore {
     }
   }
 
+  static Future<List<MealEntry>> loadMeals() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_mealsKey);
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      final items = jsonDecode(raw) as List<dynamic>;
+      return items
+          .map((e) => MealEntry.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
   static Future<void> saveWorkouts(List<WorkoutEntry> items) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
@@ -138,7 +187,37 @@ class LocalStore {
       jsonEncode(items.map((e) => e.toJson()).toList()),
     );
   }
+
+  static Future<void> saveMeals(List<MealEntry> items) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _mealsKey,
+      jsonEncode(items.map((e) => e.toJson()).toList()),
+    );
+  }
 }
+
+int calculateStreak(List<WorkoutEntry> workouts) {
+  if (workouts.isEmpty) return 0;
+  final days = workouts.map((e) => dayOnly(e.createdAt)).toSet().toList()
+    ..sort((a, b) => b.compareTo(a));
+
+  var cursor = days.first;
+  var streak = 1;
+  for (var i = 1; i < days.length; i++) {
+    final expected = cursor.subtract(const Duration(days: 1));
+    if (days[i] == expected) {
+      streak++;
+      cursor = days[i];
+    } else {
+      break;
+    }
+  }
+  return streak;
+}
+
+String timeText(DateTime d) =>
+    '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
 
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
@@ -152,6 +231,7 @@ class _MainShellState extends State<MainShell> {
   bool loading = true;
   final workouts = <WorkoutEntry>[];
   final weights = <WeightEntry>[];
+  final meals = <MealEntry>[];
 
   @override
   void initState() {
@@ -162,6 +242,7 @@ class _MainShellState extends State<MainShell> {
   Future<void> _load() async {
     final loadedWorkouts = await LocalStore.loadWorkouts();
     final loadedWeights = await LocalStore.loadWeights();
+    final loadedMeals = await LocalStore.loadMeals();
     if (!mounted) return;
     setState(() {
       workouts
@@ -170,6 +251,9 @@ class _MainShellState extends State<MainShell> {
       weights
         ..clear()
         ..addAll(loadedWeights);
+      meals
+        ..clear()
+        ..addAll(loadedMeals);
       loading = false;
     });
   }
@@ -194,14 +278,29 @@ class _MainShellState extends State<MainShell> {
     await LocalStore.saveWeights(weights);
   }
 
+  Future<void> _addMeal(MealEntry entry) async {
+    setState(() => meals.add(entry));
+    await LocalStore.saveMeals(meals);
+  }
+
+  Future<void> _deleteMeal(String id) async {
+    setState(() => meals.removeWhere((e) => e.id == id));
+    await LocalStore.saveMeals(meals);
+  }
+
   @override
   Widget build(BuildContext context) {
     final pages = [
-      HomePage(workouts: workouts, weights: weights),
+      HomePage(workouts: workouts, weights: weights, meals: meals),
       WorkoutPage(
         workouts: workouts,
         onAdded: _addWorkout,
         onDeleted: _deleteWorkout,
+      ),
+      MealPage(
+        meals: meals,
+        onAdded: _addMeal,
+        onDeleted: _deleteMeal,
       ),
       CalendarPage(workouts: workouts),
       WeightPage(
@@ -232,6 +331,7 @@ class _MainShellState extends State<MainShell> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
         onDestinationSelected: (value) => setState(() => index = value),
+        labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.home_outlined),
@@ -242,6 +342,11 @@ class _MainShellState extends State<MainShell> {
             icon: Icon(Icons.fitness_center_outlined),
             selectedIcon: Icon(Icons.fitness_center),
             label: '筋トレ',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.restaurant_outlined),
+            selectedIcon: Icon(Icons.restaurant),
+            label: '食事',
           ),
           NavigationDestination(
             icon: Icon(Icons.calendar_month_outlined),
@@ -264,36 +369,17 @@ class _MainShellState extends State<MainShell> {
   }
 }
 
-DateTime dayOnly(DateTime d) => DateTime(d.year, d.month, d.day);
-
-int calculateStreak(List<WorkoutEntry> workouts) {
-  if (workouts.isEmpty) return 0;
-  final days = workouts.map((e) => dayOnly(e.createdAt)).toSet().toList()
-    ..sort((a, b) => b.compareTo(a));
-
-  var cursor = days.first;
-  var streak = 1;
-  for (var i = 1; i < days.length; i++) {
-    final expected = cursor.subtract(const Duration(days: 1));
-    if (days[i] == expected) {
-      streak++;
-      cursor = days[i];
-    } else {
-      break;
-    }
-  }
-  return streak;
-}
-
 class HomePage extends StatelessWidget {
   const HomePage({
     super.key,
     required this.workouts,
     required this.weights,
+    required this.meals,
   });
 
   final List<WorkoutEntry> workouts;
   final List<WeightEntry> weights;
+  final List<MealEntry> meals;
 
   @override
   Widget build(BuildContext context) {
@@ -303,6 +389,8 @@ class HomePage extends StatelessWidget {
     final today = dayOnly(DateTime.now());
     final todayWorkouts =
         workouts.where((e) => dayOnly(e.createdAt) == today).toList();
+    final todayMeals =
+        meals.where((e) => dayOnly(e.createdAt) == today).toList();
     final streak = calculateStreak(workouts);
 
     return ListView(
@@ -341,10 +429,24 @@ class HomePage extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 12),
-        StatCard(
-          title: '継続日数',
-          value: '$streak 日',
-          icon: Icons.local_fire_department,
+        Row(
+          children: [
+            Expanded(
+              child: StatCard(
+                title: '今日の食事',
+                value: '${todayMeals.length} 件',
+                icon: Icons.restaurant,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: StatCard(
+                title: '継続日数',
+                value: '$streak 日',
+                icon: Icons.local_fire_department,
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 24),
         Text(
@@ -377,6 +479,39 @@ class HomePage extends StatelessWidget {
                   subtitle: Text(
                     '${e.weight.toStringAsFixed(1)} kg × ${e.reps}回 × ${e.sets}セット',
                   ),
+                ),
+              ),
+            ),
+          ),
+        const SizedBox(height: 24),
+        Text(
+          '今日の食事',
+          style: Theme.of(context)
+              .textTheme
+              .titleLarge
+              ?.copyWith(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 10),
+        if (todayMeals.isEmpty)
+          const EmptyCard(
+            icon: Icons.restaurant_outlined,
+            title: '食事記録はまだありません',
+            subtitle: '「食事」タブから今日の食事を追加できます。',
+          )
+        else
+          ...todayMeals.map(
+            (e) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Card(
+                child: ListTile(
+                  leading: const CircleAvatar(
+                    child: Icon(Icons.restaurant),
+                  ),
+                  title: Text(
+                    '${e.mealType}　${e.food}',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(timeText(e.createdAt)),
                 ),
               ),
             ),
@@ -628,6 +763,162 @@ class _WorkoutPageState extends State<WorkoutPage> {
   }
 }
 
+class MealPage extends StatefulWidget {
+  const MealPage({
+    super.key,
+    required this.meals,
+    required this.onAdded,
+    required this.onDeleted,
+  });
+
+  final List<MealEntry> meals;
+  final ValueChanged<MealEntry> onAdded;
+  final ValueChanged<String> onDeleted;
+
+  @override
+  State<MealPage> createState() => _MealPageState();
+}
+
+class _MealPageState extends State<MealPage> {
+  final food = TextEditingController();
+  final memo = TextEditingController();
+  String mealType = '朝食';
+
+  void addMeal() {
+    if (food.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('食べたものを入力してください。')),
+      );
+      return;
+    }
+
+    widget.onAdded(
+      MealEntry(
+        id: DateTime.now().microsecondsSinceEpoch.toString(),
+        mealType: mealType,
+        food: food.text.trim(),
+        memo: memo.text.trim(),
+        createdAt: DateTime.now(),
+      ),
+    );
+
+    food.clear();
+    memo.clear();
+    FocusScope.of(context).unfocus();
+  }
+
+  @override
+  void dispose() {
+    food.dispose();
+    memo.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sorted = [...widget.meals]
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Text(
+          '食事を記録',
+          style: Theme.of(context)
+              .textTheme
+              .headlineSmall
+              ?.copyWith(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 14),
+        DropdownButtonFormField<String>(
+          initialValue: mealType,
+          decoration: const InputDecoration(
+            labelText: '食事の種類',
+            border: OutlineInputBorder(),
+          ),
+          items: const [
+            DropdownMenuItem(value: '朝食', child: Text('朝食')),
+            DropdownMenuItem(value: '昼食', child: Text('昼食')),
+            DropdownMenuItem(value: '夕食', child: Text('夕食')),
+            DropdownMenuItem(value: '間食', child: Text('間食')),
+            DropdownMenuItem(value: 'その他', child: Text('その他')),
+          ],
+          onChanged: (value) {
+            if (value != null) setState(() => mealType = value);
+          },
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: food,
+          decoration: const InputDecoration(
+            labelText: '食べたもの',
+            hintText: '例：鶏むね肉、白ごはん、サラダ',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: memo,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            labelText: 'メモ（任意）',
+            hintText: '量、体調、感想など',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 12),
+        FilledButton.icon(
+          onPressed: addMeal,
+          icon: const Icon(Icons.add),
+          label: const Text('食事を追加'),
+        ),
+        const SizedBox(height: 24),
+        Text(
+          '食事記録',
+          style: Theme.of(context)
+              .textTheme
+              .titleLarge
+              ?.copyWith(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 10),
+        if (sorted.isEmpty)
+          const EmptyCard(
+            icon: Icons.restaurant,
+            title: '食事記録はまだありません',
+            subtitle: '最初の食事を登録しましょう。',
+          )
+        else
+          ...sorted.map(
+            (e) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Card(
+                child: ListTile(
+                  leading: const CircleAvatar(
+                    child: Icon(Icons.restaurant),
+                  ),
+                  title: Text(
+                    '${e.mealType}　${e.food}',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    '${e.createdAt.year}/${e.createdAt.month}/${e.createdAt.day} ${timeText(e.createdAt)}'
+                    '${e.memo.isEmpty ? '' : '\n${e.memo}'}',
+                  ),
+                  isThreeLine: e.memo.isNotEmpty,
+                  trailing: IconButton(
+                    tooltip: '削除',
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () => widget.onDeleted(e.id),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class CalendarPage extends StatelessWidget {
   const CalendarPage({super.key, required this.workouts});
 
@@ -838,7 +1129,7 @@ class SettingsPage extends StatelessWidget {
           child: ListTile(
             leading: Icon(Icons.save),
             title: Text('端末内保存'),
-            subtitle: Text('筋トレ記録と体重記録を自動保存します'),
+            subtitle: Text('筋トレ・体重・食事を自動保存します'),
             trailing: Icon(Icons.check_circle),
           ),
         ),
@@ -846,8 +1137,8 @@ class SettingsPage extends StatelessWidget {
         const Card(
           child: ListTile(
             leading: Icon(Icons.info_outline),
-            title: Text('ORUSO Ver.0.2'),
-            subtitle: Text('記録保存・削除・継続日数対応'),
+            title: Text('ORUSO Ver.0.3'),
+            subtitle: Text('食事記録に対応'),
           ),
         ),
       ],
